@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft. All rights reserved.
 
 from collections.abc import AsyncIterable, Awaitable, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import pytest
@@ -20,7 +21,7 @@ from agent_framework import (
     WorkflowInvocationKwargs,
     WorkflowRunState,
 )
-from agent_framework._workflows._const import WORKFLOW_RUN_KWARGS_KEY
+from agent_framework._workflows._const import WORKFLOW_RUN_KWARGS_KEY, ResolvedWorkflowInvocationKwargs
 from agent_framework.orchestrations import (
     ConcurrentBuilder,
     GroupChatBuilder,
@@ -840,8 +841,8 @@ async def test_continuation_tools_preserve_existing_invocation_kwargs() -> None:
 
     assert captured_run_kwargs == [
         {
-            "function_invocation_kwargs": {"__global__": function_kwargs},
-            "client_kwargs": {"__global__": client_kwargs},
+            "function_invocation_kwargs": ResolvedWorkflowInvocationKwargs(global_kwargs=function_kwargs),
+            "client_kwargs": ResolvedWorkflowInvocationKwargs(global_kwargs=client_kwargs),
         }
     ]
 
@@ -971,8 +972,8 @@ async def test_subworkflow_resume_tools_preserve_child_invocation_kwargs() -> No
 
     assert captured_child_kwargs == [
         {
-            "function_invocation_kwargs": {"__global__": function_kwargs},
-            "client_kwargs": {"__global__": client_kwargs},
+            "function_invocation_kwargs": ResolvedWorkflowInvocationKwargs(global_kwargs=function_kwargs),
+            "client_kwargs": ResolvedWorkflowInvocationKwargs(global_kwargs=client_kwargs),
         }
     ]
 
@@ -1210,6 +1211,30 @@ async def test_global_and_per_executor_function_invocation_kwargs_are_merged() -
     }
 
 
+async def test_global_kwargs_are_not_confused_with_executor_named_global() -> None:
+    """An executor named __global__ still receives targeted kwargs independently."""
+    global_agent = _KwargsCapturingAgent(name="__global__")
+    other_agent = _KwargsCapturingAgent(name="other_agent")
+    workflow = SequentialBuilder(participants=[global_agent, other_agent]).build()
+
+    async for event in workflow.run(
+        "test",
+        stream=True,
+        function_invocation_kwargs=WorkflowInvocationKwargs(
+            global_kwargs={"shared": True},
+            executor_kwargs={"__global__": {"targeted": True}},
+        ),
+    ):
+        if event.type == "status" and event.state == WorkflowRunState.IDLE:
+            break
+
+    assert global_agent.captured_kwargs[0].get("function_invocation_kwargs") == {
+        "shared": True,
+        "targeted": True,
+    }
+    assert other_agent.captured_kwargs[0].get("function_invocation_kwargs") == {"shared": True}
+
+
 async def test_per_executor_kwargs_unmatched_agent_gets_none() -> None:
     """An agent not targeted in per-executor kwargs should receive None for that kwarg."""
     agent1 = _KwargsCapturingAgent(name="agent1")
@@ -1278,6 +1303,19 @@ async def test_per_executor_client_kwargs_routes_correctly() -> None:
     assert agent1.captured_kwargs[0].get("client_kwargs") == {"temperature": 0.1}
     assert len(agent2.captured_kwargs) >= 1
     assert agent2.captured_kwargs[0].get("client_kwargs") == {"temperature": 0.9}
+
+
+async def test_mapping_proxy_kwargs_are_supported() -> None:
+    """Mapping implementations are snapshotted before entering workflow state."""
+    agent = _KwargsCapturingAgent(name="proxy_agent")
+    workflow = SequentialBuilder(participants=[agent]).build()
+    kwargs = MappingProxyType({"proxy_agent": MappingProxyType({"value": "preserved"})})
+
+    async for event in workflow.run("test", stream=True, function_invocation_kwargs=kwargs):
+        if event.type == "status" and event.state == WorkflowRunState.IDLE:
+            break
+
+    assert agent.captured_kwargs[0].get("function_invocation_kwargs") == {"value": "preserved"}
 
 
 async def test_global_and_per_executor_client_kwargs_are_merged() -> None:

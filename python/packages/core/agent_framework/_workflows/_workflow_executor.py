@@ -11,10 +11,10 @@ if TYPE_CHECKING:
     from ._workflow import Workflow
 
 from ._const import (
-    GLOBAL_KWARGS_KEY,
     RAW_CLIENT_KWARGS_KEY,
     RAW_FUNCTION_INVOCATION_KWARGS_KEY,
     WORKFLOW_RUN_KWARGS_KEY,
+    ResolvedWorkflowInvocationKwargs,
 )
 from ._edge_runner import gather_cancelling_siblings_on_error
 from ._events import (
@@ -379,31 +379,7 @@ class WorkflowExecutor(Executor):
         logger.debug(f"WorkflowExecutor {self.id} starting sub-workflow {self.workflow.id}")
 
         # Get kwargs from parent workflow's State to propagate to subworkflow
-        parent_kwargs: dict[str, Any] = ctx.get_state(WORKFLOW_RUN_KWARGS_KEY, {})
-
-        # Use the caller's raw kwargs so legacy per-executor mappings are resolved
-        # against the child workflow's executor IDs rather than the parent's.
-        fi_kwargs: WorkflowInvocationKwargs | Mapping[str, Any] | None = None
-        ci_kwargs: WorkflowInvocationKwargs | Mapping[str, Any] | None = None
-        for key in ("function_invocation_kwargs", "client_kwargs"):
-            raw_key = (
-                RAW_FUNCTION_INVOCATION_KWARGS_KEY if key == "function_invocation_kwargs" else RAW_CLIENT_KWARGS_KEY
-            )
-            raw_value = parent_kwargs.get(raw_key)
-            if raw_value is not None:
-                resolved = cast(WorkflowInvocationKwargs | Mapping[str, Any], raw_value)
-            else:
-                normalized: Any = parent_kwargs.get(key)
-                if isinstance(normalized, dict):
-                    normalized_dict = cast(dict[str, Any], normalized)
-                    if len(normalized_dict) == 1 and GLOBAL_KWARGS_KEY in normalized_dict:
-                        normalized = normalized_dict[GLOBAL_KWARGS_KEY]
-                resolved = cast(WorkflowInvocationKwargs | Mapping[str, Any] | None, normalized)
-            if resolved is not None:
-                if key == "function_invocation_kwargs":
-                    fi_kwargs = resolved
-                else:
-                    ci_kwargs = resolved
+        fi_kwargs, ci_kwargs = self._get_child_invocation_kwargs(ctx.get_state(WORKFLOW_RUN_KWARGS_KEY, {}))
 
         # Run the sub-workflow and collect all events, passing parent kwargs
         result = await self.workflow.run(
@@ -417,6 +393,28 @@ class WorkflowExecutor(Executor):
 
         # Process the workflow result using shared logic
         await self._process_workflow_result(result, ctx)
+
+    def _get_child_invocation_kwargs(
+        self, parent_kwargs: dict[str, Any]
+    ) -> tuple[
+        WorkflowInvocationKwargs | Mapping[str, Any] | None,
+        WorkflowInvocationKwargs | Mapping[str, Any] | None,
+    ]:
+        """Get caller kwargs for a child workflow from the parent run state."""
+        child_kwargs: list[WorkflowInvocationKwargs | Mapping[str, Any] | None] = []
+        for key, raw_key in (
+            ("function_invocation_kwargs", RAW_FUNCTION_INVOCATION_KWARGS_KEY),
+            ("client_kwargs", RAW_CLIENT_KWARGS_KEY),
+        ):
+            raw_value = parent_kwargs.get(raw_key)
+            if raw_value is not None:
+                child_kwargs.append(cast(WorkflowInvocationKwargs | Mapping[str, Any], raw_value))
+                continue
+            normalized: Any = parent_kwargs.get(key)
+            if isinstance(normalized, ResolvedWorkflowInvocationKwargs):
+                normalized = normalized.global_kwargs
+            child_kwargs.append(cast(WorkflowInvocationKwargs | Mapping[str, Any] | None, normalized))
+        return child_kwargs[0], child_kwargs[1]
 
     @handler
     async def handle_message_wrapped_request_response(
@@ -466,9 +464,12 @@ class WorkflowExecutor(Executor):
     @override
     async def _cancel_pending_request(self, request_id: str, ctx: WorkflowContext[Any, Any]) -> None:
         """Propagate cancellation into the wrapped workflow."""
+        fi_kwargs, ci_kwargs = self._get_child_invocation_kwargs(ctx.get_state(WORKFLOW_RUN_KWARGS_KEY, {}))
         result = await self.workflow.cancel_pending_requests(
             [request_id],
             tools=ctx.get_runtime_tools(),
+            function_invocation_kwargs=fi_kwargs,
+            client_kwargs=ci_kwargs,
         )
         await self._process_workflow_result(result, ctx)
 

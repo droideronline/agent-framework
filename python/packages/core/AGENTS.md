@@ -258,6 +258,8 @@ The vector store API is experimental under the shared `VECTOR_STORES` feature ID
   remaining requests were already answered, accepts the same request-scoped tools and invocation/client kwargs needed
   by that continuation, can atomically restore a supplied checkpoint before cancellation, and returns the resulting
   `WorkflowRunResult`.
+- **`WorkflowInvocationKwargs`** - Explicitly combines global invocation/client kwargs with executor-specific
+  overrides while preserving the legacy flat and per-executor mapping forms.
 - **`WorkflowBuilder`** - Fluent API for building workflows, including explicit
   `output_from` / `intermediate_output_from` selection for caller-facing emissions. `output_from`
   is an allow-list for **Workflow Output**; unselected executor payloads are hidden unless
